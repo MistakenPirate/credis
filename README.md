@@ -68,7 +68,7 @@ Credis is a minimalistic Redis-like server implemented in C. It supports basic k
 
 - **main.c**: Contains the main server logic, including command-line argument parsing, server initialization, and the event loop.
 - **handle.h**: Defines the `KeyValue` struct and function prototypes for handling client requests.
-- **handle.c**: Implements the `handle()` function to process client commands and manage the key-value store.
+- **multiplexing.c**: Implements the `handle()` function to process client commands and manage the key-value store.
 
 ## Limitations
 
