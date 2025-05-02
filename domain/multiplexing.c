@@ -14,12 +14,15 @@
 KeyValue kv_store[100];
 int kv_count = 0;
 
-void parse_resp_command(char *buffer, char **tokens, int *token_count) {
+void parse_resp_command(char *buffer, char **tokens, int *token_count)
+{
     char *token = strtok(buffer, "\r\n");
     *token_count = 0;
 
-    while (token != NULL) {
-        if (token[0] == '*' || token[0] == '$') {
+    while (token != NULL)
+    {
+        if (token[0] == '*' || token[0] == '$')
+        {
             // Skip array length or string length
             token = strtok(NULL, "\r\n");
             continue;
@@ -29,33 +32,42 @@ void parse_resp_command(char *buffer, char **tokens, int *token_count) {
     }
 }
 
-char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, char *result) {
+char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, char *result)
+{
     memset(result, 0, 1028);
 
     char *tokens[10];
     int token_count = 0;
     parse_resp_command(buffer, tokens, &token_count);
 
-    if (token_count == 0) {
+    if (token_count == 0)
+    {
         snprintf(result, 1028, "-ERR no command provided\r\n");
         return result;
     }
 
-    if (strcasecmp(tokens[0], "SET") == 0 && token_count == 3) {
-        if (kv_count < 100) {
+    if (strcasecmp(tokens[0], "SET") == 0 && token_count == 3)
+    {
+        if (kv_count < 100)
+        {
             strncpy(kv_store[kv_count].key, tokens[1], MAX_KEY_LEN - 1);
             strncpy(kv_store[kv_count].value, tokens[2], MAX_VALUE_LEN - 1);
             kv_count++;
             snprintf(result, 1028, "+OK\r\n");
-        } else {
+        }
+        else
+        {
             snprintf(result, 1028, "-ERR store limit reached\r\n");
         }
         return result;
     }
 
-    if (strcasecmp(tokens[0], "GET") == 0 && token_count == 2) {
-        for (int i = 0; i < kv_count; i++) {
-            if (strcmp(kv_store[i].key, tokens[1]) == 0) {
+    if (strcasecmp(tokens[0], "GET") == 0 && token_count == 2)
+    {
+        for (int i = 0; i < kv_count; i++)
+        {
+            if (strcmp(kv_store[i].key, tokens[1]) == 0)
+            {
                 snprintf(result, 1028, "$%zu\r\n%s\r\n", strlen(kv_store[i].value), kv_store[i].value);
                 return result;
             }
@@ -64,7 +76,43 @@ char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, 
         return result;
     }
 
-    if (strcasecmp(tokens[0], "PING") == 0) {
+    if (strcasecmp(tokens[0], "DEL") == 0 && token_count == 2)
+    {
+        int found = 0;
+        for (int i = 0; i < kv_count; i++)
+        {
+            if (strcmp(kv_store[i].key, tokens[1]) == 0)
+            {
+                for (int j = i; j < kv_count - 1; j++)
+                {
+                    kv_store[j] = kv_store[j + 1];
+                }
+                kv_count--;
+                found = 1;
+                snprintf(result, 1028, ":1\r\n");
+                return result;
+            }
+        }
+        snprintf(result, 1028, ":0\r\n");
+        return result;
+    }
+
+    if (strcasecmp(tokens[0], "EXISTS") == 0 && token_count == 2)
+    {
+        for (int i = 0; i < kv_count; i++)
+        {
+            if (strcmp(kv_store[i].key, tokens[1]) == 0)
+            {
+                snprintf(result, 1028, ":1\r\n");
+                return result;
+            }
+        }
+        snprintf(result, 1028, ":0\r\n");
+        return result;
+    }
+
+    if (strcasecmp(tokens[0], "PING") == 0)
+    {
         snprintf(result, 1028, "+PONG\r\n");
         return result;
     }
@@ -73,11 +121,13 @@ char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, 
     return result;
 }
 
-void multiplexing(char *host, int port) {
+void multiplexing(char *host, int port)
+{
     int server_fd;
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
 
-    if (server_fd == -1) {
+    if (server_fd == -1)
+    {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
@@ -87,13 +137,15 @@ void multiplexing(char *host, int port) {
     address.sin_addr.s_addr = inet_addr(host);
     address.sin_port = htons(port);
 
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0) {
+    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
+    {
         perror("Bind failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, MAX_CLIENTS) < 0) {
+    if (listen(server_fd, MAX_CLIENTS) < 0)
+    {
         perror("Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
@@ -106,41 +158,58 @@ void multiplexing(char *host, int port) {
     FD_ZERO(&master_set);
     FD_SET(server_fd, &master_set);
 
-    while (1) {
+    while (1)
+    {
         read_fds = master_set;
 
-        if (select(fd_max + 1, &read_fds, NULL, NULL, NULL) == -1) {
+        if (select(fd_max + 1, &read_fds, NULL, NULL, NULL) == -1)
+        {
             perror("select failed");
             exit(EXIT_FAILURE);
         }
 
-        for (int i = 0; i <= fd_max; i++) {
-            if (FD_ISSET(i, &read_fds)) {
-                if (i == server_fd) {
+        for (int i = 0; i <= fd_max; i++)
+        {
+            if (FD_ISSET(i, &read_fds))
+            {
+                if (i == server_fd)
+                {
                     int new_socket;
                     int addrlen = sizeof(address);
                     new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
-                    if (new_socket == -1) {
+                    if (new_socket == -1)
+                    {
                         perror("accept failed");
-                    } else {
+                    }
+                    else
+                    {
                         FD_SET(new_socket, &master_set);
-                        if (new_socket > fd_max) {
+                        if (new_socket > fd_max)
+                        {
                             fd_max = new_socket;
                         }
                         printf("New connection accepted\n");
                     }
-                } else {
+                }
+                else
+                {
                     char buffer[1024] = {0};
                     int valread = read(i, buffer, 1024);
-                    if (valread <= 0) {
-                        if (valread == 0) {
+                    if (valread <= 0)
+                    {
+                        if (valread == 0)
+                        {
                             printf("Client disconnected\n");
-                        } else {
+                        }
+                        else
+                        {
                             perror("read error");
                         }
                         close(i);
                         FD_CLR(i, &master_set);
-                    } else {
+                    }
+                    else
+                    {
                         printf("Message received: %s\n", buffer);
 
                         char response[1028];
