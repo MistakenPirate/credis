@@ -1,11 +1,13 @@
 # Credis - A Simple Redis-like Server in C
 
-Credis is a minimalistic Redis-like server implemented in C. It supports basic key-value storage operations such as `SET`, `GET`, and `PING`. The server uses multiplexing with `select()` to handle multiple client connections concurrently.
+Credis is a minimalistic Redis-like server implemented in C. It supports basic key-value storage operations such as `SET`, `GET`, `DEL`, `EXISTS` and `PING`. The server uses multiplexing with `select()` to handle multiple client connections concurrently.
 
 ## Features
 
 - **SET key value**: Stores a key-value pair in memory.
 - **GET key**: Retrieves the value associated with a key.
+- **DEL key**: Deletes the key-value pair in memory.
+- **EXISTS key**: Checks is the value for a key exists.
 - **PING**: Responds with `PONG` to check server availability.
 - **Multiplexing**: Handles multiple client connections using `select()`.
 
