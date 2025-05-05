@@ -28,7 +28,7 @@ Credis is a minimalistic Redis-like server implemented in C. It supports basic k
 
 2. **Compile the Code**:
    ```bash
-   gcc -o credis main.c
+   gcc -o credis main.c domain/multiplexing.c
    ```
 
 3. **Run the Server**:
