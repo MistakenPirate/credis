@@ -1,12 +1,17 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
-#include <sys/event.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "handle.h"
+
+#ifdef __linux__
+#include <sys/epoll.h>
+#elif defined(__APPLE__)
+#include <sys/event.h>
+#endif
 
 #define MAX_EVENTS 64
 
@@ -200,6 +205,31 @@ char *handle(char *buffer, char *result)
     return result;
 }
 
+static void handle_client(int fd)
+{
+    char buffer[1024] = {0};
+    int valread = read(fd, buffer, sizeof(buffer) - 1);
+    if (valread <= 0)
+    {
+        if (valread == 0)
+        {
+            printf("Client disconnected\n");
+        }
+        else
+        {
+            perror("read error");
+        }
+        close(fd);
+        return;
+    }
+
+    printf("Message received: %s\n", buffer);
+
+    char response[1028];
+    char *handled_resp = handle(buffer, response);
+    send(fd, handled_resp, strlen(handled_resp), 0);
+}
+
 void multiplexing(char *host, int port)
 {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -233,6 +263,72 @@ void multiplexing(char *host, int port)
 
     printf("Server running on %s:%d\n", host, port);
 
+#ifdef __linux__
+    // Linux: use epoll
+    int epfd = epoll_create1(0);
+    if (epfd == -1)
+    {
+        perror("epoll_create1 failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    struct epoll_event ev, events[MAX_EVENTS];
+    ev.events = EPOLLIN;
+    ev.data.fd = server_fd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, server_fd, &ev) == -1)
+    {
+        perror("epoll_ctl failed");
+        close(server_fd);
+        close(epfd);
+        exit(EXIT_FAILURE);
+    }
+
+    while (1)
+    {
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, -1);
+        if (nfds == -1)
+        {
+            perror("epoll_wait failed");
+            break;
+        }
+
+        for (int i = 0; i < nfds; i++)
+        {
+            int fd = events[i].data.fd;
+
+            if (fd == server_fd)
+            {
+                int addrlen = sizeof(address);
+                int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+                if (new_socket == -1)
+                {
+                    perror("accept failed");
+                    continue;
+                }
+
+                ev.events = EPOLLIN;
+                ev.data.fd = new_socket;
+                if (epoll_ctl(epfd, EPOLL_CTL_ADD, new_socket, &ev) == -1)
+                {
+                    perror("epoll_ctl add client failed");
+                    close(new_socket);
+                    continue;
+                }
+                printf("New connection accepted\n");
+            }
+            else
+            {
+                handle_client(fd);
+                epoll_ctl(epfd, EPOLL_CTL_DEL, fd, NULL);
+            }
+        }
+    }
+
+    close(epfd);
+
+#elif defined(__APPLE__)
+    // macOS: use kqueue
     int kq = kqueue();
     if (kq == -1)
     {
@@ -294,32 +390,16 @@ void multiplexing(char *host, int port)
             }
             else
             {
-                char buffer[1024] = {0};
-                int valread = read(fd, buffer, sizeof(buffer) - 1);
-                if (valread <= 0)
-                {
-                    if (valread == 0)
-                    {
-                        printf("Client disconnected\n");
-                    }
-                    else
-                    {
-                        perror("read error");
-                    }
-                    close(fd);
-                }
-                else
-                {
-                    printf("Message received: %s\n", buffer);
-
-                    char response[1028];
-                    char *handled_resp = handle(buffer, response);
-                    send(fd, handled_resp, strlen(handled_resp), 0);
-                }
+                handle_client(fd);
             }
         }
     }
 
     close(kq);
+
+#else
+#error "Unsupported platform. Use Linux or macOS."
+#endif
+
     close(server_fd);
 }
