@@ -1,38 +1,141 @@
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #include <sys/types.h>
+#include <sys/event.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <sys/select.h>
 #include <stdlib.h>
 #include <string.h>
 #include "handle.h"
 
-#define PROMPT "redis > "
-#define MAX_CLIENTS 10
+#define MAX_EVENTS 64
 
-KeyValue kv_store[100];
-int kv_count = 0;
+HashTable kv_store = {0};
 
-void parse_resp_command(char *buffer, char **tokens, int *token_count)
+// Hash function (djb2)
+static unsigned long hash(const char *str)
 {
-    char *token = strtok(buffer, "\r\n");
-    *token_count = 0;
-
-    while (token != NULL)
+    unsigned long hash = 5381;
+    int c;
+    while ((c = *str++))
     {
-        if (token[0] == '*' || token[0] == '$')
+        hash = ((hash << 5) + hash) + c;
+    }
+    return hash % HASH_TABLE_SIZE;
+}
+
+static HashNode *ht_find(const char *key)
+{
+    unsigned long index = hash(key);
+    HashNode *node = kv_store.buckets[index];
+    while (node)
+    {
+        if (strcmp(node->key, key) == 0)
         {
-            // Skip array length or string length
-            token = strtok(NULL, "\r\n");
+            return node;
+        }
+        node = node->next;
+    }
+    return NULL;
+}
+
+static int ht_set(const char *key, const char *value)
+{
+    HashNode *existing = ht_find(key);
+    if (existing)
+    {
+        strncpy(existing->value, value, MAX_VALUE_LEN - 1);
+        existing->value[MAX_VALUE_LEN - 1] = '\0';
+        return 1;
+    }
+
+    unsigned long index = hash(key);
+    HashNode *node = malloc(sizeof(HashNode));
+    if (!node)
+    {
+        return 0;
+    }
+
+    strncpy(node->key, key, MAX_KEY_LEN - 1);
+    node->key[MAX_KEY_LEN - 1] = '\0';
+    strncpy(node->value, value, MAX_VALUE_LEN - 1);
+    node->value[MAX_VALUE_LEN - 1] = '\0';
+
+    node->next = kv_store.buckets[index];
+    kv_store.buckets[index] = node;
+    kv_store.count++;
+    return 1;
+}
+
+static int ht_delete(const char *key)
+{
+    unsigned long index = hash(key);
+    HashNode *node = kv_store.buckets[index];
+    HashNode *prev = NULL;
+
+    while (node)
+    {
+        if (strcmp(node->key, key) == 0)
+        {
+            if (prev)
+            {
+                prev->next = node->next;
+            }
+            else
+            {
+                kv_store.buckets[index] = node->next;
+            }
+            free(node);
+            kv_store.count--;
+            return 1;
+        }
+        prev = node;
+        node = node->next;
+    }
+    return 0;
+}
+
+void parse_resp_command(char *buffer, char *tokens[], int *token_count)
+{
+    *token_count = 0;
+    char *ptr = buffer;
+    char *end;
+
+    while (*ptr && *token_count < 10)
+    {
+        if (*ptr == '*' || *ptr == '$')
+        {
+            end = strstr(ptr, "\r\n");
+            if (end)
+            {
+                ptr = end + 2;
+            }
+            else
+            {
+                break;
+            }
             continue;
         }
-        tokens[(*token_count)++] = token;
-        token = strtok(NULL, "\r\n");
+
+        end = strstr(ptr, "\r\n");
+        if (end)
+        {
+            *end = '\0';
+            tokens[(*token_count)++] = ptr;
+            ptr = end + 2;
+        }
+        else
+        {
+            if (*ptr)
+            {
+                tokens[(*token_count)++] = ptr;
+            }
+            break;
+        }
     }
 }
 
-char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, char *result)
+char *handle(char *buffer, char *result)
 {
     memset(result, 0, 1028);
 
@@ -48,66 +151,42 @@ char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, 
 
     if (strcasecmp(tokens[0], "SET") == 0 && token_count == 3)
     {
-        if (kv_count < 100)
+        if (ht_set(tokens[1], tokens[2]))
         {
-            strncpy(kv_store[kv_count].key, tokens[1], MAX_KEY_LEN - 1);
-            strncpy(kv_store[kv_count].value, tokens[2], MAX_VALUE_LEN - 1);
-            kv_count++;
             snprintf(result, 1028, "+OK\r\n");
         }
         else
         {
-            snprintf(result, 1028, "-ERR store limit reached\r\n");
+            snprintf(result, 1028, "-ERR failed to set key\r\n");
         }
         return result;
     }
 
     if (strcasecmp(tokens[0], "GET") == 0 && token_count == 2)
     {
-        for (int i = 0; i < kv_count; i++)
+        HashNode *node = ht_find(tokens[1]);
+        if (node)
         {
-            if (strcmp(kv_store[i].key, tokens[1]) == 0)
-            {
-                snprintf(result, 1028, "$%zu\r\n%s\r\n", strlen(kv_store[i].value), kv_store[i].value);
-                return result;
-            }
+            snprintf(result, 1028, "$%zu\r\n%s\r\n", strlen(node->value), node->value);
         }
-        snprintf(result, 1028, "-ERR key not found\r\n");
+        else
+        {
+            snprintf(result, 1028, "$-1\r\n");
+        }
         return result;
     }
 
     if (strcasecmp(tokens[0], "DEL") == 0 && token_count == 2)
     {
-        int found = 0;
-        for (int i = 0; i < kv_count; i++)
-        {
-            if (strcmp(kv_store[i].key, tokens[1]) == 0)
-            {
-                for (int j = i; j < kv_count - 1; j++)
-                {
-                    kv_store[j] = kv_store[j + 1];
-                }
-                kv_count--;
-                found = 1;
-                snprintf(result, 1028, ":1\r\n");
-                return result;
-            }
-        }
-        snprintf(result, 1028, ":0\r\n");
+        int deleted = ht_delete(tokens[1]);
+        snprintf(result, 1028, ":%d\r\n", deleted);
         return result;
     }
 
     if (strcasecmp(tokens[0], "EXISTS") == 0 && token_count == 2)
     {
-        for (int i = 0; i < kv_count; i++)
-        {
-            if (strcmp(kv_store[i].key, tokens[1]) == 0)
-            {
-                snprintf(result, 1028, ":1\r\n");
-                return result;
-            }
-        }
-        snprintf(result, 1028, ":0\r\n");
+        HashNode *node = ht_find(tokens[1]);
+        snprintf(result, 1028, ":%d\r\n", node ? 1 : 0);
         return result;
     }
 
@@ -123,14 +202,15 @@ char *handle(char *buffer, int client_socket, int server_fd, fd_set master_set, 
 
 void multiplexing(char *host, int port)
 {
-    int server_fd;
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
+    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd == -1)
     {
         perror("socket failed");
         exit(EXIT_FAILURE);
     }
+
+    int opt = 1;
+    setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     struct sockaddr_in address;
     address.sin_family = AF_INET;
@@ -144,82 +224,102 @@ void multiplexing(char *host, int port)
         exit(EXIT_FAILURE);
     }
 
-    if (listen(server_fd, MAX_CLIENTS) < 0)
+    if (listen(server_fd, SOMAXCONN) < 0)
     {
         perror("Listen failed");
         close(server_fd);
         exit(EXIT_FAILURE);
     }
 
-    printf("Server running on http://%s:%d\n", host, port);
+    printf("Server running on %s:%d\n", host, port);
 
-    fd_set master_set, read_fds;
-    int fd_max = server_fd;
-    FD_ZERO(&master_set);
-    FD_SET(server_fd, &master_set);
+    int kq = kqueue();
+    if (kq == -1)
+    {
+        perror("kqueue failed");
+        close(server_fd);
+        exit(EXIT_FAILURE);
+    }
+
+    struct kevent change;
+    EV_SET(&change, server_fd, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
+    if (kevent(kq, &change, 1, NULL, 0, NULL) == -1)
+    {
+        perror("kevent failed");
+        close(server_fd);
+        close(kq);
+        exit(EXIT_FAILURE);
+    }
+
+    struct kevent events[MAX_EVENTS];
 
     while (1)
     {
-        read_fds = master_set;
-
-        if (select(fd_max + 1, &read_fds, NULL, NULL, NULL) == -1)
+        int nev = kevent(kq, NULL, 0, events, MAX_EVENTS, NULL);
+        if (nev == -1)
         {
-            perror("select failed");
-            exit(EXIT_FAILURE);
+            perror("kevent wait failed");
+            break;
         }
 
-        for (int i = 0; i <= fd_max; i++)
+        for (int i = 0; i < nev; i++)
         {
-            if (FD_ISSET(i, &read_fds))
+            int fd = (int)events[i].ident;
+
+            if (events[i].flags & EV_EOF)
             {
-                if (i == server_fd)
+                printf("Client disconnected\n");
+                close(fd);
+                continue;
+            }
+
+            if (fd == server_fd)
+            {
+                int addrlen = sizeof(address);
+                int new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
+                if (new_socket == -1)
                 {
-                    int new_socket;
-                    int addrlen = sizeof(address);
-                    new_socket = accept(server_fd, (struct sockaddr *)&address, (socklen_t *)&addrlen);
-                    if (new_socket == -1)
+                    perror("accept failed");
+                    continue;
+                }
+
+                EV_SET(&change, new_socket, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, NULL);
+                if (kevent(kq, &change, 1, NULL, 0, NULL) == -1)
+                {
+                    perror("kevent add client failed");
+                    close(new_socket);
+                    continue;
+                }
+                printf("New connection accepted\n");
+            }
+            else
+            {
+                char buffer[1024] = {0};
+                int valread = read(fd, buffer, sizeof(buffer) - 1);
+                if (valread <= 0)
+                {
+                    if (valread == 0)
                     {
-                        perror("accept failed");
+                        printf("Client disconnected\n");
                     }
                     else
                     {
-                        FD_SET(new_socket, &master_set);
-                        if (new_socket > fd_max)
-                        {
-                            fd_max = new_socket;
-                        }
-                        printf("New connection accepted\n");
+                        perror("read error");
                     }
+                    close(fd);
                 }
                 else
                 {
-                    char buffer[1024] = {0};
-                    int valread = read(i, buffer, 1024);
-                    if (valread <= 0)
-                    {
-                        if (valread == 0)
-                        {
-                            printf("Client disconnected\n");
-                        }
-                        else
-                        {
-                            perror("read error");
-                        }
-                        close(i);
-                        FD_CLR(i, &master_set);
-                    }
-                    else
-                    {
-                        printf("Message received: %s\n", buffer);
+                    printf("Message received: %s\n", buffer);
 
-                        char response[1028];
-                        char *handled_resp = handle(buffer, i, server_fd, master_set, response);
-                        send(i, handled_resp, strlen(handled_resp), 0);
-                    }
+                    char response[1028];
+                    char *handled_resp = handle(buffer, response);
+                    send(fd, handled_resp, strlen(handled_resp), 0);
                 }
             }
         }
     }
 
+    close(kq);
     close(server_fd);
 }
